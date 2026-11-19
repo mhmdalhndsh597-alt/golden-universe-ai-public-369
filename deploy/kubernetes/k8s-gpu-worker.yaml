@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gu-ai-grid
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: gu-ai-grid
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          args: ["--appendonly", "yes", "--requirepass", "$(REDIS_PASSWORD)"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-auth
+                  key: password
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping"]
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping"]
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: gu-ai-grid
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gu-ai-control-plane
+  namespace: gu-ai-grid
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: gu-ai-control-plane
+  template:
+    metadata:
+      labels:
+        app: gu-ai-control-plane
+    spec:
+      containers:
+        - name: control-plane
+          image: ghcr.io/golden-universe-ai/gu-ai-grid-control-plane:1.0.0
+          ports:
+            - containerPort: 8000
+          env:
+            - name: REDIS_URL
+              value: redis://redis.gu-ai-grid.svc.cluster.local:6379/0
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gu-ai-gpu-worker
+  namespace: gu-ai-grid
+spec:
+  selector:
+    matchLabels:
+      app: gu-ai-gpu-worker
+  template:
+    metadata:
+      labels:
+        app: gu-ai-gpu-worker
+    spec:
+      runtimeClassName: nvidia
+      containers:
+        - name: worker
+          image: nvcr.io/nvidia/cuda:12.6.3-runtime-ubuntu24.04
+          command: ["sleep", "infinity"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: "16Gi"
+            requests:
+              nvidia.com/gpu: 1
+              cpu: "1"
+              memory: "8Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gu-ai-control-plane
+  namespace: gu-ai-grid
+spec:
+  selector:
+    app: gu-ai-control-plane
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
